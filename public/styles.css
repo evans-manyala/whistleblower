@@ -315,6 +315,14 @@ textarea { resize: vertical; }
 #description-count { text-align: right; }
 .form-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 20px; }
 .form-actions--leading { justify-content: flex-start; }
+.evidence-files { list-style: none; padding: 0; margin: 0; }
+.evidence-files li, .evidence-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.evidence-files li { justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.evidence-files li:last-child { border-bottom: 0; }
+.evidence-files li > :first-child { min-width: 0; }
+.evidence-actions a { display: inline-flex; min-height: 40px; align-items: center; }
+.evidence-field input[type=file] { max-width: 100%; min-height: 40px; }
+.evidence-field p { margin-block: 4px 8px; }
 .form-error { margin-top: 12px; color: #8c3424; font-size: .9rem; }
 .privacy-choices { display: grid; gap: 9px; margin: 0; padding: 0; min-width: 0; border: 0; }
 .choice { display: flex; align-items: flex-start; gap: 9px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 9px; cursor: pointer; }

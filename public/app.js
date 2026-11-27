@@ -29,6 +29,8 @@ const freshDraft = () => ({
 });
 
 let draft = freshDraft();
+const evidenceEnabled = document.querySelector('meta[name="whistleblower-evidence"]').content === "on";
+let evidenceFiles = [];
 let receipt = null;
 let route = "";
 let pageVersion = 0;
@@ -188,6 +190,30 @@ function reportPage() {
   </div>`;
 }
 
+function selectedFiles() {
+  return evidenceFiles.map((file, index) => `<li><span>${escapeHtml(file.name)}</span>
+    <button type="button" class="button button--secondary press" data-remove-file="${index}" aria-label="Remove ${escapeHtml(file.name)}">Remove</button></li>`).join("");
+}
+
+function evidenceField() {
+  return `<div class="evidence-field">
+    <label for="evidence-files">Supporting evidence <span class="optional">Optional</span></label>
+    <p class="field-hint" id="evidence-help">Choose up to 3 JPEG, PNG, WebP or plain-text files. Each can be up to 4 MiB, with 8 MiB total. Original files may include identifying details, such as photo location.</p>
+    <input id="evidence-files" type="file" multiple accept=".jpg,.jpeg,.png,.webp,.txt" aria-describedby="evidence-help evidence-error">
+    <ul class="evidence-files" id="selected-files">${selectedFiles()}</ul>
+    <p class="form-error" id="evidence-error" role="alert" hidden></p>
+  </div>`;
+}
+
+function encodedFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ name: file.name, data: reader.result.split(",")[1] });
+    reader.onerror = reader.onabort = () => reject(new Error("This file could not be read. Choose it again."));
+    reader.readAsDataURL(file);
+  });
+}
+
 function detailsStep() {
   return `
     <div class="panel-heading"><h2 tabindex="-1">What happened?</h2><p>Include details that would help a reviewer understand the concern.</p></div>
@@ -213,6 +239,7 @@ function detailsStep() {
           <input type="text" name="location" id="location" maxlength="120" placeholder="Office, department or online" value="${escapeHtml(draft.location)}" />
         </label>
       </div>
+      ${evidenceEnabled ? evidenceField() : ""}
     </div>`;
 }
 
@@ -249,6 +276,7 @@ function reviewStep() {
       ${detailRow("Description", escapeHtml(draft.description.trim()))}
       ${draft.occurredOn ? detailRow("Date", prettyDate(draft.occurredOn)) : ""}
       ${draft.location.trim() ? detailRow("Location", escapeHtml(draft.location.trim())) : ""}
+      ${evidenceFiles.length ? detailRow("Evidence", evidenceFiles.map(file => escapeHtml(file.name)).join("<br>")) : ""}
       ${detailRow("Identity", draft.privacy === "anonymous" ? "Anonymous" : escapeHtml(draft.email.trim()))}
     </dl>`;
 }
@@ -421,6 +449,18 @@ function reviewerInbox() {
   </div>`;
 }
 
+function reviewerEvidence(data) {
+  if (data.evidenceError) return `<section class="panel"><h2>Supporting evidence</h2><p role="alert">${escapeHtml(data.evidenceError)}</p></section>`;
+  if (!data.evidence?.length) return "";
+  return `<section class="panel"><div class="panel-heading"><h2>Supporting evidence</h2></div>
+    <ul class="evidence-files">${data.evidence.map(file => {
+      const path = tenantPrefix + "/api/reviewer/reports/" + encodeURIComponent(data.reference) + "/evidence/" + encodeURIComponent(file.id);
+      return `<li><div><strong>${escapeHtml(file.name)}</strong><span class="field-hint">${Math.ceil(file.bytes / 1024)} KiB${file.truncated ? " · Preview shows an excerpt" : ""}</span></div>
+        <div class="evidence-actions"><a class="button button--secondary press" href="${path}/preview" target="_blank" rel="noopener" aria-label="Open preview of ${escapeHtml(file.name)} in a new tab">Preview</a>
+        <a class="text-link" href="${path}/original">Download original</a></div></li>`;
+    }).join("")}</ul></section>`;
+}
+
 function reviewerCase() {
   const data = reviewer.data;
   return `<div class="page-narrow">
@@ -436,6 +476,7 @@ function reviewerCase() {
         ${detailRow("Contact", data.contactEmail ? escapeHtml(data.contactEmail) : "Anonymous")}
       </dl>
     </section>
+    ${reviewerEvidence(data)}
     <form class="panel" id="status-form">
       <div class="fields"><label for="case-status">Update status
         <select id="case-status" name="status">
@@ -611,6 +652,14 @@ document.addEventListener("keydown", (event) => {
 app.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
+  if (button.hasAttribute("data-remove-file")) {
+    evidenceFiles.splice(Number(button.dataset.removeFile), 1);
+    document.getElementById("selected-files").innerHTML = selectedFiles();
+    document.getElementById("evidence-error").hidden = true;
+    document.getElementById("evidence-files").focus();
+    announce("File removed.");
+    return;
+  }
   if (button.dataset.category) return chooseCategory(button.dataset.category);
   if (button.dataset.page) {
     reviewer.page = Number(button.dataset.page);
@@ -693,6 +742,23 @@ app.addEventListener("input", (event) => {
 });
 
 app.addEventListener("change", (event) => {
+  if (event.target.id === "evidence-files") {
+    const files = [...evidenceFiles, ...event.target.files];
+    const message = files.length > 3 ? "Choose up to three evidence files."
+      : files.some(file => !/\.(jpe?g|png|webp|txt)$/i.test(file.name)) ? "Choose a JPEG, PNG, WebP or .txt file."
+      : files.some(file => !file.size || file.size > 4 * 1024 ** 2 || file.name.length > 180) ? "Use nonempty files up to 4 MiB with names up to 180 characters."
+      : files.reduce((total, file) => total + file.size, 0) > 8 * 1024 ** 2 ? "Choose up to 8 MiB in total." : "";
+    const error = document.getElementById("evidence-error");
+    error.hidden = !message;
+    error.textContent = message;
+    event.target.value = "";
+    if (!message) {
+      evidenceFiles = files;
+      document.getElementById("selected-files").innerHTML = selectedFiles();
+      announce(files.length + " evidence files selected.");
+    }
+    return;
+  }
   if (event.target.id === "reviewer-filter") {
     reviewer.filter = event.target.value;
     reviewer.page = 1;
@@ -736,10 +802,13 @@ app.addEventListener("submit", async (event) => {
       case "report-form": {
         draft.code ||= randomCode();
         const code = draft.code;
-        result = await request("/api/reports", { ...draft, code });
+        result = evidenceFiles.length
+          ? await request("/api/reports/with-evidence", { ...draft, code, evidence: await Promise.all(evidenceFiles.map(encodedFile)) })
+          : await request("/api/reports", { ...draft, code });
         if (version !== pageVersion) return;
         receipt = { ...result, code };
         draft = freshDraft();
+        evidenceFiles = [];
         success = "Report submitted.";
         break;
       }

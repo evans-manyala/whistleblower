@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { adminApi, tenantAccess } from "./lib/admin-api.mjs";
 import { initializeDatabase } from "./lib/case-history.mjs";
+import { evidenceStore } from "./lib/evidence.mjs";
 import { HttpError, requireSameOrigin, sendJson } from "./lib/http.mjs";
 import { createReportingApi, localReviewerAccess } from "./lib/reporting.mjs";
 import { createPlatformStore, findOrganisation, openRegistry, openTenantDatabase } from "./lib/tenants.mjs";
@@ -59,7 +60,9 @@ function page(request, response, file, type, organisation) {
   let content = readFileSync(join(root, "public", file));
   if (organisation) {
     content = Buffer.from(content.toString().replace('name="whistleblower-organisation" content=""',
-      () => `name="whistleblower-organisation" content="${escapeAttribute(organisation.name)}"`));
+      () => `name="whistleblower-organisation" content="${escapeAttribute(organisation.name)}"`)
+      .replace('name="whistleblower-evidence" content="off"', () => process.env.WHISTLEBLOWER_KEYS_DIR
+        ? 'name="whistleblower-evidence" content="on"' : 'name="whistleblower-evidence" content="off"'));
   }
   response.writeHead(200, { "Content-Type": type, "Content-Length": content.length });
   response.end(request.method === "HEAD" ? undefined : content);
@@ -103,7 +106,8 @@ async function dispatch(request, response, url) {
   if (relative?.startsWith("/api/")) {
     const db = openTenantDatabase(dataDirectory, organisation);
     try {
-      return await createReportingApi(db, tenantAccess(platformStore, organisation))(request, response, url, relative);
+      const evidence = evidenceStore(db, organisation, process.env.WHISTLEBLOWER_KEYS_DIR);
+      return await createReportingApi(db, tenantAccess(platformStore, organisation), evidence)(request, response, url, relative);
     } finally { db.close(); }
   }
   throw new HttpError(404, "This page could not be found.");

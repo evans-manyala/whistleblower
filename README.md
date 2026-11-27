@@ -4,9 +4,10 @@ A local workplace reporting prototype. Employees can report sexual harassment, c
 
 ## Try the demo
 
-Use Node.js 24 or newer. The app has no npm dependencies.
+Use Node.js 24 or newer. Install the locked dependencies, including Sharp for image previews.
 
 ```sh
+npm ci
 npm run demo
 ```
 
@@ -20,6 +21,16 @@ Open [the local portal](http://127.0.0.1:4310/). Submit a sample report and save
 npm run check
 npm test
 ```
+
+## Supporting evidence in organisation portals
+
+Set `WHISTLEBLOWER_KEYS_DIR` to a private, persistent key directory before starting SaaS mode. In **New report → Details**, reporters can attach up to three JPEG, PNG, WebP or UTF-8 plain-text files. The limits are 4 MiB per file, 8 MiB per report and 32 megapixels per image. Choose single-frame images. The report and all its attachments are saved together.
+
+An authenticated reviewer can open a preview or download the exact original from **Reviewer access → Reported details → Supporting evidence**. Image previews use WebP at quality 88, apply the camera orientation, omit embedded metadata and fit within 1920 × 1920 pixels. Text previews use gzip and retain the first 32,768 UTF-16 code units up to a complete character. The original retains its full contents and metadata, which may identify the reporter.
+
+The service encrypts the original, preview and filename in memory with AES-256-GCM before writing to the organisation’s case database. Each representation is authenticated against its tenant, report, file ID and purpose. The append-only submission entry commits to the encrypted evidence. Report form fields and case messages still use the existing SQLite storage and need a protected volume. At an HTTPS reverse proxy, disable disk buffering and body logging for these routes, allow an encoded request up to 12 MiB, and protect temporary storage.
+
+On the first upload the service creates `<keys>/<organisation-id>.evidence.wbkey` with owner-only permissions. Escrow each evidence key in separately controlled, versioned secret storage when it is created. Include these keys in recovery drills. Restoring attachments requires the organisation’s case archive, its backup key to restore SQLite, and its original evidence key at the same filename to open the files. A missing or mismatched evidence key blocks decryption and further uploads for that organisation.
 
 ## Encrypted backups and recovery
 

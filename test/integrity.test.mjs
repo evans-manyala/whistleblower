@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { caseHistoryWriter, initializeDatabase, transaction } from "../lib/case-history.mjs";
+import { caseHistoryWriter, initializeDatabase, migrateEvidence, transaction, verifyCaseHistory } from "../lib/case-history.mjs";
 
 const run = promisify(execFile);
 const at = "2026-02-15T10:30:00.000Z";
@@ -153,6 +153,20 @@ test("pre-existing case history migrates once and retained checkpoints verify th
   });
   const result = await integrity("", "verify", "--db", path, "--checkpoint", checkpoint);
   assert.match(result.stdout, /5 entries, including the retained checkpoint/);
+});
+
+test("adding evidence storage preserves retained v1 checkpoints and open reviewer sessions", async context => {
+  const path = join(await workspace(context), "v1.sqlite");
+  seed(path);
+  database(path, db => {
+    db.exec("DROP TABLE evidence; DROP TABLE evidence_key; PRAGMA user_version=1;");
+    const checkpoint = verifyCaseHistory(db);
+    migrateEvidence(db);
+    migrateEvidence(db);
+    assert.equal(db.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.deepEqual(verifyCaseHistory(db, checkpoint), checkpoint);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM sessions").get().n, 1);
+  });
 });
 
 test("OpenTimestamps commands bind the proof to the verified checkpoint digest", async (context) => {

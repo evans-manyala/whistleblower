@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { copyFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,6 +9,10 @@ import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import sharp from "sharp";
+import { createEncryptedBackup, restoreEncryptedBackup } from "../lib/backup.mjs";
+import { verifyCaseHistory } from "../lib/case-history.mjs";
+import { evidenceStore } from "../lib/evidence.mjs";
 import { runAnchorSweep } from "../lib/anchors.mjs";
 import { findOrganisation, openRegistry, tenantDatabasePath, tenantDirectory } from "../lib/tenants.mjs";
 
@@ -25,7 +29,7 @@ const sample = (slug) => ({
   description: "Invented sample report for the tenant isolation test.", privacy: "anonymous",
 });
 
-async function startSaas(context) {
+async function startSaas(context, enableEvidence = false) {
   const temp = await mkdtemp(join(tmpdir(), "whistleblower-saas-test-"));
   const root = join(temp, "data");
   const archive = join(temp, "archive");
@@ -44,7 +48,8 @@ async function startSaas(context) {
   await run(process.execPath, ["--disable-warning=ExperimentalWarning", "scripts/platform.mjs", "create-admin", platformEmail], { env });
   // This fixture tests operator-generated keys. Scheduled key provisioning has its own integration test.
   const serverEnv = { ...env };
-  delete serverEnv.WHISTLEBLOWER_KEYS_DIR;
+  if (enableEvidence) delete serverEnv.WHISTLEBLOWER_ARCHIVE_DIR;
+  else delete serverEnv.WHISTLEBLOWER_KEYS_DIR;
   server = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "server.mjs", "--saas"], {
     env: serverEnv, stdio: ["ignore", "pipe", "ignore"],
   });
@@ -338,4 +343,120 @@ if (command === "stamp") {
     if (priorArchive === undefined) delete process.env.WHISTLEBLOWER_ARCHIVE_DIR; else process.env.WHISTLEBLOWER_ARCHIVE_DIR = priorArchive;
     if (priorOts === undefined) delete process.env.WHISTLEBLOWER_OTS_BIN; else process.env.WHISTLEBLOWER_OTS_BIN = priorOts;
   }
+});
+
+
+test("organisation evidence preserves exact originals, protected previews, history and recoverability", { timeout: 60_000 }, async context => {
+  const { base, root, keys, temp } = await startSaas(context, true);
+  const api = apiFor(base);
+  const platformSession = await api(central + "/login", { email: platformEmail, password: pretendPlatformPassword });
+  const makeTeam = async slug => {
+    const org = await api(central + "/workspaces", { name: slug, slug, adminEmail: "admin@example.test" }, platformSession.cookie);
+    const accept = code => api(tenant(slug, "auth/accept"), { code, password });
+    const admin = await accept(org.data.invite.code);
+    const invite = await api(tenant(slug, "admin/invites"), { email: "reviewer@example.test", role: "reviewer" }, admin.cookie);
+    const reviewer = await accept(invite.data.invite.code);
+    return { admin: admin.cookie, reviewer: reviewer.cookie };
+  };
+  const a = await makeTeam("alpha");
+  const b = await makeTeam("beta");
+  const registry = openRegistry(root, { readOnly: true });
+  const org = findOrganisation(registry, "alpha");
+  const beta = findOrganisation(registry, "beta");
+  registry.close();
+
+  const image = await sharp({ create: { width: 2100, height: 1050, channels: 3, background: "#587896" } })
+    .withMetadata({ orientation: 6 }).jpeg({ quality: 96 }).toBuffer();
+  const content = "Fictional observation 你好 — <b>sample</b>\r\n".repeat(1400);
+  const originalText = Buffer.from("\uFEFF" + content);
+  const encode = (name, bytes) => ({ name, data: bytes.toString("base64") });
+  const files = [encode("private-photo.jpg", image), encode("private-記録.txt", originalText)];
+  const submit = (slug, evidence, extra = {}) => api(tenant(slug, "reports/with-evidence"), { ...sample(slug), evidence, ...extra });
+  const [first, retry] = await Promise.all([submit("alpha", files), submit("alpha", files)]);
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  assert.equal(retry.status, 201);
+  assert.deepEqual(retry.data, first.data);
+  assert.equal((await submit("alpha", [files[1]])).status, 409);
+  const webp = await sharp(image).resize(40, 20).webp().toBuffer();
+  assert.equal((await submit("beta", [files[1], encode("sample.webp", webp)])).status, 201);
+  const ref = first.data.reference;
+  const detailPath = tenant("alpha", "reviewer/reports/" + ref);
+  const detail = (await api(detailPath, undefined, a.reviewer)).data;
+  assert.deepEqual(detail.evidence.map(f => f.name), files.map(f => f.name));
+  assert.equal(detail.evidence[1].truncated, true);
+  const tracked = await api(tenant("alpha", "track"), { code: code("alpha") });
+  assert.equal(tracked.data.evidence, undefined);
+  const filePath = (id, part) => detailPath + "/evidence/" + id + "/" + part;
+  const get = (path, cookie) => fetch(base + path, { headers: cookie ? { Cookie: cookie } : {} });
+  const id = detail.evidence[0].id;
+  for (const cookie of [undefined, a.admin, platformSession.cookie, b.reviewer]) {
+    for (const part of ["original", "preview"]) assert.equal((await get(filePath(id, part), cookie)).status, 401);
+  }
+  assert.equal((await get(filePath(id, "original").replace("/alpha/", "/beta/"), b.reviewer)).status, 404);
+  for (const [i, expected] of [image, originalText].entries()) {
+    const res = await get(filePath(detail.evidence[i].id, "original"), a.reviewer);
+    assert.match(res.headers.get("content-disposition"), /^attachment;/);
+    assert.equal(res.headers.get("content-type"), "application/octet-stream");
+    assert.equal(res.headers.get("cache-control"), "no-store");
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), expected);
+  }
+  const preview = await get(filePath(id, "preview"), a.reviewer);
+  assert.equal(preview.headers.get("content-type"), "image/webp");
+  const meta = await sharp(Buffer.from(await preview.arrayBuffer())).metadata();
+  assert.deepEqual([meta.format, meta.width, meta.height, meta.exif], ["webp", 960, 1920, undefined]);
+  const excerpt = await get(filePath(detail.evidence[1].id, "preview"), a.reviewer);
+  assert.equal(excerpt.headers.get("content-encoding"), "gzip");
+  assert.match(excerpt.headers.get("content-type"), /^text\/plain/);
+  assert.equal(await excerpt.text(), content.slice(0, 32768));
+
+  for (const bad of [
+    [files[0], encode("bad.txt", Buffer.from([0xc0, 0x80]))], [encode("fake.png", Buffer.from("<svg/>"))],
+    [encode("binary.txt", Buffer.from([0, 1, 2]))], [encode("truncated.jpg", image.subarray(0, 12))],
+    [encode("too-large.txt", Buffer.alloc(4 * 1024 ** 2 + 1))], Array(4).fill(files[1]),
+  ]) assert.equal((await submit("alpha", bad, { code: "WB/alpha/ABCDEFABCDEFABCDEFABCDEF" })).status, 400);
+
+  const path = tenantDatabasePath(root, org);
+  const db = new DatabaseSync(path);
+  context.after(() => db.close());
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM reports").get().n, 1);
+  const rows = db.prepare("SELECT * FROM evidence ORDER BY rowid").all();
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    for (const col of ["metadata", "preview", "original"]) {
+      const encrypted = Buffer.from(row[col]);
+      assert.equal(encrypted.includes(Buffer.from("private-")), false);
+      assert.equal(encrypted.includes(Buffer.from("Fictional observation")), false);
+      assert.equal(encrypted.includes(image.subarray(0, 30)), false);
+    }
+  }
+  const checkpoint = verifyCaseHistory(db);
+  const key = randomBytes(32);
+  const archive = join(temp, "evidence.wbbackup");
+  const restored = join(temp, "restored.sqlite");
+  await createEncryptedBackup(path, archive, key, checkpoint, org.log_id);
+  await restoreEncryptedBackup(archive, restored, key, checkpoint, org.log_id);
+  const recovery = new DatabaseSync(restored, { readOnly: true });
+  try {
+    const store = evidenceStore(recovery, org, keys);
+    assert.deepEqual((await store.read(ref, id, "original")).bytes, image);
+    assert.deepEqual((await store.read(ref, detail.evidence[1].id, "original")).bytes, originalText);
+    assert.deepEqual(verifyCaseHistory(recovery, checkpoint), checkpoint);
+  } finally { recovery.close(); }
+
+  const keyPath = join(keys, org.id + ".evidence.wbkey");
+  const originalKey = await readFile(keyPath);
+  const otherKey = await readFile(join(keys, beta.id + ".evidence.wbkey"));
+  assert.notDeepEqual(originalKey, otherKey);
+  await writeFile(keyPath, otherKey);
+  assert.equal((await get(filePath(id, "original"), a.reviewer)).status, 503);
+  await rm(keyPath);
+  assert.equal((await submit("alpha", [files[1]])).status, 503);
+  await assert.rejects(stat(keyPath), { code: "ENOENT" });
+  await writeFile(keyPath, originalKey, { mode: 0o600 });
+
+  db.prepare("UPDATE evidence SET original=preview WHERE id=?").run(id);
+  assert.equal((await get(filePath(id, "original"), a.reviewer)).status, 500);
+  assert.throws(() => verifyCaseHistory(db, checkpoint), /integrity failure/);
+  db.prepare("DELETE FROM evidence WHERE id=?").run(id);
+  assert.throws(() => verifyCaseHistory(db, checkpoint), /integrity failure/);
 });
