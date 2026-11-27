@@ -42,8 +42,11 @@ async function startSaas(context) {
     await rm(temp, { recursive: true, force: true });
   });
   await run(process.execPath, ["--disable-warning=ExperimentalWarning", "scripts/platform.mjs", "create-admin", platformEmail], { env });
+  // This fixture tests operator-generated keys. Scheduled key provisioning has its own integration test.
+  const serverEnv = { ...env };
+  delete serverEnv.WHISTLEBLOWER_KEYS_DIR;
   server = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "server.mjs", "--saas"], {
-    env, stdio: ["ignore", "pipe", "ignore"],
+    env: serverEnv, stdio: ["ignore", "pipe", "ignore"],
   });
   closed = once(server, "exit");
   const lines = createInterface({ input: server.stdout });
@@ -80,10 +83,12 @@ test("SaaS roles, reports, case credentials, backups and proofs never cross orga
   assert.match(await landing.text(), /admin\.js/);
   assert.equal((await fetch(base + "/admin.js")).status, 200);
   assert.equal((await api(central + "/workspaces")).status, 401);
+  assert.equal((await api(central + "/backups")).status, 401);
   const platformSession = await api(central + "/login", { email: platformEmail, password: pretendPlatformPassword });
   assert.equal(platformSession.status, 200);
   assert.match(platformSession.setCookie, /Path=\/platform\/api; HttpOnly; SameSite=Strict/);
   const p = platformSession.cookie;
+  assert.equal((await api(central + "/backups", undefined, p)).data.state, "unconfigured");
 
   const provision = (slug, adminEmail, cookie = p) => api(central + "/workspaces", {
     name: `Organisation ${slug}`, slug, adminEmail,
@@ -110,6 +115,8 @@ test("SaaS roles, reports, case credentials, backups and proofs never cross orga
   assert.equal(alphaAdmin.status, 201);
   assert.equal(betaAdmin.status, 201);
   assert.equal(alphaAdmin.data.role, "organisation_admin");
+  assert.equal((await api(central + "/backups", undefined, alphaAdmin.cookie)).status, 401);
+  assert.equal((await api(tenant("alpha-org", "admin/backups"), undefined, alphaAdmin.cookie)).status, 404);
   assert.match(alphaAdmin.setCookie, /Path=\/o\/alpha-org\/api; HttpOnly; SameSite=Strict/);
   assert.equal((await accept("alpha-org", renewed.data.invite.code)).status, 400);
   assert.equal((await api(central + "/workspaces/alpha-org/setup-invite", { email: "someone@example.test" }, p)).status, 409);

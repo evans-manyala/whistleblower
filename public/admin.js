@@ -107,6 +107,21 @@ function workspaceList() {
     </form>` : ""}</details>`).join("");
 }
 
+function backupPanel(data) {
+  const labels = { healthy: "Healthy", starting: "Awaiting backup", attention: "Needs attention",
+    unconfigured: "Setup required", configuration: "Check configuration" };
+  const reasons = { storage: "Check the archive and key directories.", key: "Check availability and permissions of the original encryption key.",
+    snapshot: "Check the source database, retained checkpoint and available storage.", recovery: "The archive failed its restore check.",
+    retention: "Check archive retention permissions.", overdue: "The scheduled backup is overdue." };
+  const configured = !["configuration", "unconfigured"].includes(data.state);
+  return `<div class="anchor-heading"><h2 id="backup-title">Encrypted backups</h2>
+    <span class="status status--${data.state === "healthy" ? "resolved" : "reviewing"}">${labels[data.state]}</span></div>
+    <p class="anchor-detail">${configured ? `${data.protected} of ${data.scopes} databases have a restore-checked backup.`
+      : data.state === "unconfigured" ? "Set separate archive and key directories on the SaaS service." : "Check the backup interval and retention settings."}</p>
+    ${data.registryAt ? `<p class="anchor-meta">Last registry backup · ${esc(date(data.registryAt))}</p>` : ""}
+    ${data.problems.length ? `<ul class="backup-alerts">${data.problems.map(problem => `<li><strong>${esc(problem.scope)}</strong> · ${reasons[problem.reason] || "Check the backup worker."}</li>`).join("")}</ul>` : ""}`;
+}
+
 function platformPage() {
   return `<div class="admin-intro">
     ${intro("Organisations", "Provision reporting portals and control organisation access.")}
@@ -114,6 +129,8 @@ function platformPage() {
   </div>
   <p id="admin-error" class="form-error" role="alert" hidden></p>
   ${invitationPanel()}
+  <section class="panel admin-section" aria-labelledby="backup-title"><div id="backup-status" aria-live="polite">${backupPanel(dashboard.backups)}</div>
+    <p class="anchor-meta" id="backup-refresh-error" role="status" hidden>Couldn’t refresh backup status. Reconnecting…</p></section>
   ${showNew ? `<form class="panel admin-settings" data-operation="create">
     ${heading("Set up an organisation", "The initial administrator receives an invitation code.")}
     <div class="fields">
@@ -222,35 +239,38 @@ async function refresh() {
   render(true);
 }
 
-let checkingAnchor = false;
-async function refreshAnchor() {
+let checkingStatus = false;
+async function refreshStatus() {
   const current = dashboard;
-  if (!current?.anchoring || checkingAnchor || document.hidden) return;
-  checkingAnchor = true;
+  const field = platform ? "backups" : "anchoring";
+  if (!current?.[field] || checkingStatus || document.hidden) return;
+  const id = platform ? "backup" : "anchor";
+  const format = platform ? backupPanel : anchorPanel;
+  checkingStatus = true;
   try {
-    const anchor = await api("/api/admin/anchoring");
+    const data = await api("/api/admin/" + field);
     if (current !== dashboard) return;
-    const panel = document.getElementById("anchor-status");
-    if (panel && JSON.stringify(anchor) !== JSON.stringify(current.anchoring)) {
-      const previous = anchorPanel(current.anchoring);
-      current.anchoring = anchor;
-      const markup = anchorPanel(anchor);
+    const panel = document.getElementById(id + "-status");
+    if (panel && JSON.stringify(data) !== JSON.stringify(current[field])) {
+      const previous = format(current[field]);
+      current[field] = data;
+      const markup = format(data);
       if (previous !== markup) {
         const focused = panel.contains(document.activeElement) ? document.activeElement.getAttribute("href") : null;
         panel.innerHTML = markup;
         if (focused) Array.from(panel.querySelectorAll("a")).find(link => link.getAttribute("href") === focused)?.focus();
       }
     }
-    document.getElementById("anchor-refresh-error").hidden = true;
+    document.getElementById(id + "-refresh-error").hidden = true;
   } catch (error) {
     if (current !== dashboard) return;
     if (error.status === 401 || error.status === 404) { await refresh(); return; }
-    document.getElementById("anchor-refresh-error").hidden = false;
-  } finally { checkingAnchor = false; }
+    document.getElementById(id + "-refresh-error").hidden = false;
+  } finally { checkingStatus = false; }
 }
-if (tenantPrefix && !joining) {
-  setInterval(refreshAnchor, 30_000);
-  document.addEventListener("visibilitychange", refreshAnchor);
+if (platform || (tenantPrefix && !joining)) {
+  setInterval(refreshStatus, 30_000);
+  document.addEventListener("visibilitychange", refreshStatus);
 }
 
 function showError(error, form) {

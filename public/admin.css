@@ -55,3 +55,4 @@
 .anchor-meta { margin: 5px 0 0; font-size: .91rem; color: var(--muted); }
 .anchor-proof { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
 .anchor-files a { display: inline-flex; align-items: center; min-height: 44px; }
+.backup-alerts { margin: 10px 0 0; padding-inline-start: 22px; overflow-wrap: anywhere; }

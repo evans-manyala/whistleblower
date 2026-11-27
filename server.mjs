@@ -85,7 +85,7 @@ async function dispatch(request, response, url) {
 
   if (path === "/" || path === "/platform/") return renderHtml(request, response, "admin.html");
   if (path === "/platform" && request.method === "GET") return redirect(response, "/platform/");
-  if (path.startsWith("/platform/api/admin/")) return await adminApi(platformStore, request, response, url, "/platform", path.slice(9));
+  if (path.startsWith("/platform/api/admin/")) return await adminApi(platformStore, request, response, url, "/platform", path.slice(9), null, { registry, dataDirectory });
 
   const match = path.match(/^\/o\/([a-z0-9-]+)(\/.*)?$/);
   const organisation = match ? findOrganisation(registry, match[1]) : null;
@@ -136,13 +136,14 @@ const server = createServer(async (request, response) => {
 server.requestTimeout = 15_000;
 server.listen(port, host, () => {
   if (saas) {
-    function startAnchoring() {
-      const worker = new Worker(new URL("./scripts/anchor-worker.mjs", import.meta.url), { workerData: { root: dataDirectory } });
-      worker.on("error", (error) => console.error("Bitcoin anchoring worker failed", error.code || error.name));
-      worker.on("exit", () => { if (server.listening) setTimeout(startAnchoring, 60_000).unref(); });
+    function startWorker(name) {
+      const worker = new Worker(new URL(`./scripts/${name}-worker.mjs`, import.meta.url), { workerData: { root: dataDirectory } });
+      worker.on("error", error => console.error(`${name} worker failed`, error.code || error.name));
+      worker.on("exit", () => { if (server.listening) setTimeout(() => startWorker(name), 60_000).unref(); });
       worker.unref();
     }
-    startAnchoring();
+    startWorker("anchor");
+    if (process.env.WHISTLEBLOWER_KEYS_DIR && process.env.WHISTLEBLOWER_ARCHIVE_DIR) startWorker("backup");
   }
   console.log(`Whistleblower is running at http://${host}:${server.address().port}/${saas ? " (SaaS)" : ""}`);
   if (demo) console.log(`Demo uses temporary data. Reviewer passphrase: ${configuredPassword}`);
