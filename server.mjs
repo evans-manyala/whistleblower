@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { categories, statuses } from "./public/catalog.js";
+import { caseHistoryWriter, initializeDatabase, transaction } from "./lib/case-history.mjs";
 
 process.umask(0o077);
 
@@ -25,28 +26,8 @@ const derivePassword = promisify(scrypt);
 if (!demo) mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
 
 const db = new DatabaseSync(demo ? ":memory:" : join(dataDirectory, "whistleblower.sqlite"));
-db.exec(`
-  PRAGMA foreign_keys = ON;
-  PRAGMA busy_timeout = 5000;
-  PRAGMA journal_mode = WAL;
-  CREATE TABLE IF NOT EXISTS reports (
-    id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, submission_hash TEXT NOT NULL,
-    category TEXT NOT NULL, summary TEXT NOT NULL, description TEXT NOT NULL,
-    occurred_on TEXT, location TEXT, contact_email TEXT, status TEXT NOT NULL,
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY, report_id TEXT NOT NULL REFERENCES reports(id), client_id TEXT,
-    kind TEXT NOT NULL, actor TEXT NOT NULL, value TEXT NOT NULL, created_at TEXT NOT NULL,
-    UNIQUE(report_id, actor, client_id)
-  );
-  CREATE INDEX IF NOT EXISTS reports_updated_at ON reports(updated_at DESC, id DESC);
-  CREATE INDEX IF NOT EXISTS events_by_report ON events(report_id, id);
-  CREATE TABLE IF NOT EXISTS sessions (
-    token_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL
-  );
-  DELETE FROM sessions;
-`);
+initializeDatabase(db);
+const history = caseHistoryWriter(db);
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const now = () => new Date().toISOString();
@@ -84,16 +65,9 @@ class HttpError extends Error {
   }
 }
 
-function transaction(run) {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = run();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  }
+function recordCaseEvent(reference, clientId, kind, actor, value, at) {
+  const event = eventInsert.run(reference, clientId, kind, actor, value, at);
+  history.recordEvent(reference, event.lastInsertRowid);
 }
 
 function limit(request, scope, count, milliseconds) {
@@ -171,7 +145,7 @@ function newReport(body) {
   const codeHash = sha256(code);
   const values = [body.category, summary, description, date || null, location || null, email || null];
   const submissionHash = sha256(JSON.stringify(values));
-  return transaction(() => {
+  return transaction(db, () => {
     const prior = reportByCode.get(codeHash);
     if (prior) {
       if (prior.submission_hash !== submissionHash) throw new HttpError(409, "This case code already belongs to a submitted report. Use it to track that report.");
@@ -183,7 +157,8 @@ function newReport(body) {
       INSERT INTO reports (id, code_hash, submission_hash, category, summary, description, occurred_on, location, contact_email, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?)
     `).run(reference, codeHash, submissionHash, ...values, at, at);
-    eventInsert.run(reference, null, "status", "system", "received", at);
+    history.recordSubmission(reference);
+    recordCaseEvent(reference, null, "status", "system", "received", at);
     return { reference, createdAt: at };
   });
 }
@@ -218,7 +193,7 @@ function addMessage(report, body, actor) {
   if (typeof body.clientId !== "string" || !/^[0-9a-f-]{36}$/i.test(body.clientId)) {
     throw new HttpError(400, "This message could not be sent. Try again.");
   }
-  return transaction(() => {
+  return transaction(db, () => {
     const current = reportById.get(report.id);
     const prior = db.prepare("SELECT value FROM events WHERE report_id = ? AND actor = ? AND client_id = ?")
       .get(current.id, actor, body.clientId);
@@ -228,7 +203,7 @@ function addMessage(report, body, actor) {
     }
     if (current.status === "resolved") throw new HttpError(409, "This report is resolved. Messaging is closed.");
     const at = now();
-    eventInsert.run(current.id, body.clientId, "message", actor, value, at);
+    recordCaseEvent(current.id, body.clientId, "message", actor, value, at);
     db.prepare("UPDATE reports SET updated_at = ? WHERE id = ?").run(at, current.id);
     return reportById.get(current.id);
   });
@@ -236,12 +211,12 @@ function addMessage(report, body, actor) {
 
 function updateStatus(report, status) {
   if (typeof status !== "string" || !hasStatus(status)) throw new HttpError(400, "Choose a valid status.");
-  return transaction(() => {
+  return transaction(db, () => {
     const current = reportById.get(report.id);
     if (current.status === status) return current;
     const at = now();
     db.prepare("UPDATE reports SET status = ?, updated_at = ? WHERE id = ?").run(status, at, current.id);
-    eventInsert.run(current.id, null, "status", "reviewer", status, at);
+    recordCaseEvent(current.id, null, "status", "reviewer", status, at);
     return reportById.get(current.id);
   });
 }

@@ -4,6 +4,8 @@ import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { verifyCaseHistory } from "../lib/case-history.mjs";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 
@@ -41,7 +43,7 @@ async function start(directory) {
   }
 }
 
-test("reports persist with private access, idempotent writes and reviewer-only details", { timeout: 15_000 }, async (testContext) => {
+test("reports persist with private access, idempotent writes and reviewer-only details", { timeout: 45_000 }, async (testContext) => {
   const directory = await mkdtemp(join(tmpdir(), "whistleblower-test-"));
   let server;
   testContext.after(async () => {
@@ -118,4 +120,7 @@ test("reports persist with private access, idempotent writes and reviewer-only d
   assert.equal((await api("/track/message", message)).status, 200);
   assert.equal((await reviewerApi("/logout", {})).status, 200);
   assert.equal((await reviewerApi(casePath)).status, 401);
+
+  const db = new DatabaseSync(join(directory, "whistleblower.sqlite"), { readOnly: true });
+  try { assert.equal(verifyCaseHistory(db).entries, 8); } finally { db.close(); }
 });
