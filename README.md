@@ -55,11 +55,51 @@ Run checkpointing on a fixed cadence. OpenTimestamps sends an opaque digest to c
 
 ## Organisation administration
 
-The current **Reviewer access** module handles case review for one installation. Deployment setup uses environment variables and the operator CLI. A shared SaaS needs authenticated platform administration for organisation provisioning and tenant-scoped administration for reviewer invitations, permissions, intake settings, and retention. Establish tenant isolation across reports, case-code lookups, backups, and audit proofs before onboarding organisations into a shared instance.
+Start SaaS mode with a dedicated data directory. The platform operator creates the first account from a trusted operator shell. Load `WHISTLEBLOWER_PLATFORM_ADMIN_PASSWORD` from a secret manager or a private shell prompt, then clear it from the environment after account creation.
+
+```sh
+export WHISTLEBLOWER_DATA_DIR=/var/lib/whistleblower/saas
+npm run platform -- create-admin operator@example.org
+unset WHISTLEBLOWER_PLATFORM_ADMIN_PASSWORD
+npm run saas
+```
+
+Open the [Platform Admin portal](http://127.0.0.1:4310/platform/). Create an organisation, then deliver the one-time invitation code and its acceptance page privately to the appointed administrator. Invitation codes expire after 72 hours. The Platform Admin can replace an unused initial invitation or suspend an organisation and end its sessions.
+
+| Access | Entry point | Scope |
+| --- | --- | --- |
+| Platform Admin | `/platform/` | Provision, suspend, and reactivate organisations |
+| Organisation Admin | `/o/<org>/admin/` | Manage the organisation’s name and intake, invite admins and reviewers, and revoke access |
+| Reviewer | `/o/<org>/#/reviewer` | Review reports and follow up in their organisation |
+| Reporter | `/o/<org>/` | Submit and track reports using the organisation’s case code |
+
+Organisation invitations grant access only to the issuing organisation. Platform and organisation administrators use their own accounts and roles. Reviewers have a separate role. SaaS mode stores the platform registry separately and creates a case database and case history ID for each new organisation. Existing standalone data stays in the standalone deployment. Case codes use the issuing portal address as part of the credential.
+
+For a shared HTTPS installation, set `WHISTLEBLOWER_ORIGIN` to the public HTTPS origin and run behind a trusted TLS reverse proxy. Preserve the public Host on proxied requests and overwrite `X-Real-IP` with the actual client address. Serve the application only through that proxy. Back up the platform registry separately using operator-controlled protected storage. It contains the mapping between organisation addresses, accounts, and their storage directories.
+
+### Organisation backups and proofs
+
+The operator CLI requires an organisation for SaaS operations. Resolve keys and archives under separately controlled directories. The CLI chooses each organisation’s database, encryption key, and archive namespace from the registry. The encryption and verification paths also bind to that organisation’s case history ID.
+
+```sh
+export WHISTLEBLOWER_KEYS_DIR=/secure/whistleblower-keys
+export WHISTLEBLOWER_ARCHIVE_DIR=/backup/whistleblower-archives
+npm run integrity -- keygen --org example-org
+npm run integrity -- checkpoint monday.json --org example-org
+npm run integrity -- backup monday.wbbackup --org example-org --checkpoint monday.json
+npm run integrity -- restore monday.wbbackup drill-1 --org example-org --checkpoint monday.json
+npm run integrity -- stamp monday.json --org example-org
+npm run integrity -- upgrade monday.json --org example-org
+npm run integrity -- verify-anchor monday.json --org example-org
+```
+
+In SaaS mode, use simple artifact filenames. A restore writes a verified SQLite file in that organisation’s recovery directory. Review it before replacing the live database in a controlled maintenance window. Store independent copies of the encrypted archives and checkpoint pairs. Keep the keys separate.
+
+The tenant and role isolation tests exercise crossed sessions, invitations, case codes, report references, backups, and audit proofs.
 
 ## Prototype boundaries
 
-This app is for local evaluation with sample information. It binds to the loopback interface and supports one organisation and one shared reviewer passphrase. A case code grants access to the summary, status and follow-up conversation. Details that could identify a reporter may still be present in text they choose to share. Before using it for real reports, establish individual reviewer accounts, HTTPS, protection for the live database, independent review routing, and data retention and access policies.
+This app is for local evaluation with sample information. It binds to the loopback interface. Standalone mode uses one shared reviewer passphrase. SaaS mode uses individual accounts and per-organisation storage. A case code grants access to the summary, status and follow-up conversation. Details that could identify a reporter may still be present in text they choose to share. Before using it for real reports, establish individual reviewer accounts, HTTPS, protection for the live database, independent review routing, and data retention and access policies.
 
 ## Artwork
 

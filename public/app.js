@@ -1,6 +1,8 @@
 import { categories, statuses } from "./catalog.js";
 
 const app = document.querySelector("#app");
+const tenantPrefix = location.pathname.match(/^\/o\/[a-z0-9-]+(?=\/$)/)?.[0] || "";
+const tenantName = document.querySelector('meta[name="whistleblower-organisation"]').content;
 const dialog = document.querySelector("#search-dialog");
 const announcer = document.querySelector("#announcer");
 
@@ -89,19 +91,23 @@ function draw({ keepFocus = false } = {}) {
     <aside class="sidebar">
       <a class="brand press" href="#/" aria-label="Whistleblower overview">
         <span class="brand-mark">${icon("shield", true)}</span>
-        <span class="brand-name">Whistleblower</span>
+        <span class="brand-label"><span class="brand-name">Whistleblower</span>
+          ${tenantName ? `<span class="brand-organisation">${escapeHtml(tenantName)}</span>` : ""}</span>
       </a>
       <nav class="navigation" aria-label="Reporting portal">
         <div class="navigation-main">
           <span class="navigation-label">Workspace</span>
           ${tabs.slice(0, 4).map(navItem).join("")}
         </div>
-        <div class="navigation-bottom">${navItem(tabs[4])}</div>
+        <div class="navigation-bottom">
+          ${navItem(tabs[4])}
+          ${tenantPrefix ? `<a class="nav-link press" href="${tenantPrefix}/admin/">${icon("lock")}<span>Organisation admin</span></a>` : ""}
+        </div>
       </nav>
     </aside>
     <div class="workspace">
       <header class="topbar">
-        <span class="topbar-title">Reporting portal</span>
+        <span class="topbar-title">${tenantName ? escapeHtml(tenantName) : "Reporting portal"}</span>
         <button type="button" class="search-trigger press" id="open-search" data-action="search" aria-label="Search the portal" aria-keyshortcuts="Meta+K Control+K">
           ${icon("search")}<span>Search</span><kbd>⌘ K</kbd>
         </button>
@@ -146,7 +152,7 @@ function overview() {
       </div>
       <a class="button button--secondary press" href="#/track">Track a report</a>
     </section>
-    <footer class="portal-footer">${icon("info")} Local prototype · Use sample information only</footer>`;
+    ${location.protocol === "https:" ? "" : `<footer class="portal-footer">${icon("info")} Local prototype · Use sample information only</footer>`}`;
 }
 
 function pageIntro(title, description, marker = "") {
@@ -178,7 +184,7 @@ function reportPage() {
         <button data-progress="${draft.step === 3 ? "Submitting…" : ""}" class="button button--primary press" type="submit">${draft.step === 3 ? "Submit report" : "Continue"}</button>
       </div>
     </form>
-    <p class="panel-footnote">${icon("info")} Local prototype. Please use sample information only.</p>
+    ${location.protocol === "https:" ? "" : `<p class="panel-footnote">${icon("info")} Local prototype. Please use sample information only.</p>`}
   </div>`;
 }
 
@@ -280,8 +286,8 @@ function trackingPage() {
     <form class="panel" id="tracking-form" autocomplete="off">
       <div class="fields">
         <label for="tracking-code">Case code
-          <input type="text" class="monospace" name="code" id="tracking-code" required maxlength="64" spellcheck="false" autocapitalize="characters" placeholder="WB-…" value="${escapeHtml(tracking.code)}" aria-describedby="tracking-hint" />
-          <span id="tracking-hint" class="field-hint">You can paste the code with or without hyphens.</span>
+          <input type="text" class="monospace" name="code" id="tracking-code" required maxlength="96" spellcheck="false" autocapitalize="characters" placeholder="${tenantPrefix ? `WB/${tenantPrefix.slice(3)}/…` : "WB-…"}" value="${escapeHtml(tracking.code)}" aria-describedby="tracking-hint" />
+          <span id="tracking-hint" class="field-hint">${tenantPrefix ? "Paste the full code, including the organisation address." : "You can paste the code with or without hyphens."}</span>
         </label>
       </div>
       <p class="form-error" id="tracking-error" role="alert" hidden></p>
@@ -359,9 +365,11 @@ function reviewerPage() {
       ${route !== "/reviewer" ? '<a class="button button--secondary press" href="#/reviewer">Inbox</a>' : ""}
     </div></div>`;
   if (reviewer.view === "login") return `<div class="page-narrow page-narrow--small">
-    ${pageIntro("Reviewer access", "Sign in with your workspace passphrase to review reports.", "lock")}
+    ${pageIntro("Reviewer access", "Sign in to review reports for this workspace.", "lock")}
     <form class="panel" id="login-form">
-      <div class="fields"><label for="password">Reviewer passphrase
+      <div class="fields">
+      ${tenantPrefix ? '<label for="reviewer-email">Email address<input id="reviewer-email" name="email" type="email" autocomplete="username" maxlength="254" required /></label>' : ""}
+      <label for="password">Reviewer passphrase
         <input id="password" name="password" type="password" autocomplete="current-password" maxlength="512" required />
       </label></div>
       <p class="form-error" id="login-error" role="alert" hidden></p>
@@ -369,6 +377,7 @@ function reviewerPage() {
         <button class="button button--primary press" data-progress="Signing in…" type="submit">Sign in</button>
       </div>
     </form>
+    ${tenantPrefix ? `<p class="page-end"><a class="text-link return-link" href="${tenantPrefix}/join/">Accept an invitation</a></p>` : ""}
   </div>`;
   return route === "/reviewer" ? reviewerInbox() : reviewerCase();
 }
@@ -446,7 +455,7 @@ function reviewerCase() {
 async function request(path, body) {
   let response;
   try {
-    response = await fetch(path, body === undefined ? {} : {
+    response = await fetch(tenantPrefix + path, body === undefined ? {} : {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
   } catch {
@@ -516,7 +525,8 @@ function refreshReviewer() {
 
 function randomCode() {
   const bytes = Array.from(crypto.getRandomValues(new Uint8Array(12)), (byte) => byte.toString(16).padStart(2, "0"));
-  return `WB-${bytes.join("").toUpperCase().match(/.{4}/g).join("-")}`;
+  const prefix = tenantPrefix ? `WB/${tenantPrefix.slice(3)}/` : "WB-";
+  return prefix + bytes.join("").toUpperCase().match(/.{4}/g).join("-");
 }
 
 function nextStep(step) {

@@ -9,8 +9,10 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.mjs",
     "demo": "node --disable-warning=ExperimentalWarning server.mjs --demo",
-    "check": "node --check server.mjs && node --check lib/case-history.mjs && node --check lib/backup.mjs && node --check lib/checkpoints.mjs && node --check scripts/integrity.mjs && node --check public/app.js && node --check public/catalog.js",
+    "check": "node --check server.mjs && node --check lib/http.mjs && node --check lib/tenants.mjs && node --check lib/admin-api.mjs && node --check lib/reporting.mjs && node --check lib/case-history.mjs && node --check lib/backup.mjs && node --check lib/checkpoints.mjs && node --check scripts/integrity.mjs && node --check scripts/platform.mjs && node --check public/app.js && node --check public/admin.js && node --check public/catalog.js",
     "test": "node --test",
-    "integrity": "node --disable-warning=ExperimentalWarning scripts/integrity.mjs"
+    "integrity": "node --disable-warning=ExperimentalWarning scripts/integrity.mjs",
+    "saas": "node --disable-warning=ExperimentalWarning server.mjs --saas",
+    "platform": "node --disable-warning=ExperimentalWarning scripts/platform.mjs"
   }
 }
