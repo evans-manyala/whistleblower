@@ -42,6 +42,7 @@ if (saas) {
 
 const web = new Map([
   ["/app.js", "text/javascript; charset=utf-8"],
+  ["/anchor-audit.js", "text/javascript; charset=utf-8"],
   ["/admin.js", "text/javascript; charset=utf-8"],
   ["/catalog.js", "text/javascript; charset=utf-8"],
   ["/styles.css", "text/css; charset=utf-8"],

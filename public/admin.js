@@ -1,3 +1,5 @@
+import { anchorAudit, auditTime } from "./anchor-audit.js";
+
 const app = document.querySelector("#app");
 const dialog = document.querySelector("#confirm-dialog");
 const announce = document.querySelector("#admin-announcement");
@@ -12,6 +14,7 @@ const names = { platform_admin: "Platform Admin", organisation_admin: "Organisat
 
 let state = landing || joining ? "guest" : "loading";
 let dashboard;
+let statusRetrievedAt;
 let invitation;
 let showNew = false;
 let filter = "";
@@ -155,38 +158,16 @@ function accessList(entries, pending) {
   </li>`).join("")}</ul>`;
 }
 
-function anchorPanel(anchor) {
-  const { state, verified } = anchor;
-  const stages = {
-    waiting: ["Awaiting first checkpoint", "The service will create the first checkpoint when this organisation has case history."],
-    queued: ["Preparing checkpoint", "The service is submitting a commitment to OpenTimestamps."],
-    pending: ["Awaiting Bitcoin confirmation", "The receipt is saved. Calendar confirmations can take several hours."],
-    verifying: ["Verifying proof", "A calendar returned an attestation. The service is checking it against Bitcoin and this case history."],
-    verified: ["Verified", "The checkpoint matches this organisation’s case history and a verified Bitcoin block."],
-    retrying: ["Retry scheduled", { queued: "The checkpoint submission could not be completed.", pending: "The saved receipt could not be upgraded.", verifying: "Bitcoin verification could not be completed." }[anchor.phase]],
-    check_failed: ["History check needs attention", "The latest case history check failed. The service will retry. Contact your platform operator if this continues."],
-  };
-  const [label, detail] = stages[state];
-  const base = verified && tenantPrefix + "/api/admin/anchoring/" + verified.entries;
-  return `<div class="anchor-heading"><h2 id="anchor-title">Bitcoin anchoring</h2>
-    <span class="status status--${state === "verified" ? "resolved" : ["retrying", "check_failed"].includes(state) ? "reviewing" : "received"}">${label}</span></div>
-    <p class="anchor-detail">${detail}</p>
-    ${anchor.entries && state !== "verified" ? `<p class="anchor-meta">Latest checkpoint · ${anchor.entries} history entries</p>` : ""}
-    ${state === "retrying" && anchor.retryAt ? `<p class="anchor-meta">Next attempt from ${esc(date(anchor.retryAt))}</p>` : ""}
-    ${verified ? `<div class="anchor-proof">
-      <strong>${state === "verified" ? "Bitcoin block" : "Last verified Bitcoin block"} ${verified.block.toLocaleString(undefined, { useGrouping: false })}</strong>
-      <p class="anchor-meta">${verified.entries} history entries · Verified ${esc(date(verified.at))}</p>
-      <div class="anchor-files"><a class="text-link" href="${base}/checkpoint" download>Download checkpoint</a>
-        <a class="text-link" href="${base}/receipt" download>Download receipt</a></div>
-      </div>` : ""}`;
-}
-
 function organisationPage() {
   return `${intro("Access & settings", `Manage the reporting portal for ${esc(dashboard.organisation.name)}.`)}
   <p id="admin-error" class="form-error" role="alert" hidden></p>
   ${invitationPanel()}
-  <section class="panel admin-section admin-settings" aria-labelledby="anchor-title">
-    <div id="anchor-status" aria-live="polite">${anchorPanel(dashboard.anchoring)}</div>
+  <section class="panel admin-section audit-panel" aria-labelledby="anchor-title">
+    <p class="audit-print-only audit-org">${esc(dashboard.organisation.name)}</p>
+    <div class="audit-heading"><h2 id="anchor-title">Case history verification</h2>
+      <button class="button button--secondary press" type="button" data-print-audit>Print audit summary</button></div>
+    <div id="anchor-status" aria-live="polite">${anchorAudit(dashboard.anchoring, tenantPrefix)}</div>
+    <p class="audit-print-only audit-timing">Dashboard status retrieved <span id="audit-as-of">${auditTime(statusRetrievedAt)}</span></p>
     <p class="anchor-meta" id="anchor-refresh-error" role="status" hidden>Couldn’t refresh anchoring status. Reconnecting…</p>
   </section>
   <section class="admin-section">
@@ -230,6 +211,7 @@ async function api(endpoint, data) {
 async function refresh() {
   try {
     dashboard = await api(platform ? "/api/admin/workspaces" : "/api/admin/settings");
+    statusRetrievedAt = Date.now();
     state = "ready";
   } catch (error) {
     dashboard = null;
@@ -245,7 +227,7 @@ async function refreshStatus() {
   const field = platform ? "backups" : "anchoring";
   if (!current?.[field] || checkingStatus || document.hidden) return;
   const id = platform ? "backup" : "anchor";
-  const format = platform ? backupPanel : anchorPanel;
+  const format = platform ? backupPanel : data => anchorAudit(data, tenantPrefix);
   checkingStatus = true;
   try {
     const data = await api("/api/admin/" + field);
@@ -260,6 +242,10 @@ async function refreshStatus() {
         panel.innerHTML = markup;
         if (focused) Array.from(panel.querySelectorAll("a")).find(link => link.getAttribute("href") === focused)?.focus();
       }
+    }
+    if (!platform) {
+      statusRetrievedAt = Date.now();
+      document.getElementById("audit-as-of").innerHTML = auditTime(statusRetrievedAt);
     }
     document.getElementById(id + "-refresh-error").hidden = true;
   } catch (error) {
@@ -378,6 +364,7 @@ app.addEventListener("click", async (event) => {
       announce.textContent = "Copy the selected code.";
     }
   }
+  if (button.hasAttribute("data-print-audit")) { window.print(); return; }
   if (button.hasAttribute("data-sign-out")) {
     button.disabled = true;
     try { await api("/api/admin/logout", {}); await refresh(); }
