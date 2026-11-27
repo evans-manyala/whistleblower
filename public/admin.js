@@ -138,10 +138,40 @@ function accessList(entries, pending) {
   </li>`).join("")}</ul>`;
 }
 
+function anchorPanel(anchor) {
+  const { state, verified } = anchor;
+  const stages = {
+    waiting: ["Awaiting first checkpoint", "The service will create the first checkpoint when this organisation has case history."],
+    queued: ["Preparing checkpoint", "The service is submitting a commitment to OpenTimestamps."],
+    pending: ["Awaiting Bitcoin confirmation", "The receipt is saved. Calendar confirmations can take several hours."],
+    verifying: ["Verifying proof", "A calendar returned an attestation. The service is checking it against Bitcoin and this case history."],
+    verified: ["Verified", "The checkpoint matches this organisation’s case history and a verified Bitcoin block."],
+    retrying: ["Retry scheduled", { queued: "The checkpoint submission could not be completed.", pending: "The saved receipt could not be upgraded.", verifying: "Bitcoin verification could not be completed." }[anchor.phase]],
+    check_failed: ["History check needs attention", "The latest case history check failed. The service will retry. Contact your platform operator if this continues."],
+  };
+  const [label, detail] = stages[state];
+  const base = verified && tenantPrefix + "/api/admin/anchoring/" + verified.entries;
+  return `<div class="anchor-heading"><h2 id="anchor-title">Bitcoin anchoring</h2>
+    <span class="status status--${state === "verified" ? "resolved" : ["retrying", "check_failed"].includes(state) ? "reviewing" : "received"}">${label}</span></div>
+    <p class="anchor-detail">${detail}</p>
+    ${anchor.entries && state !== "verified" ? `<p class="anchor-meta">Latest checkpoint · ${anchor.entries} history entries</p>` : ""}
+    ${state === "retrying" && anchor.retryAt ? `<p class="anchor-meta">Next attempt from ${esc(date(anchor.retryAt))}</p>` : ""}
+    ${verified ? `<div class="anchor-proof">
+      <strong>${state === "verified" ? "Bitcoin block" : "Last verified Bitcoin block"} ${verified.block.toLocaleString(undefined, { useGrouping: false })}</strong>
+      <p class="anchor-meta">${verified.entries} history entries · Verified ${esc(date(verified.at))}</p>
+      <div class="anchor-files"><a class="text-link" href="${base}/checkpoint" download>Download checkpoint</a>
+        <a class="text-link" href="${base}/receipt" download>Download receipt</a></div>
+      </div>` : ""}`;
+}
+
 function organisationPage() {
   return `${intro("Access & settings", `Manage the reporting portal for ${esc(dashboard.organisation.name)}.`)}
   <p id="admin-error" class="form-error" role="alert" hidden></p>
   ${invitationPanel()}
+  <section class="panel admin-section admin-settings" aria-labelledby="anchor-title">
+    <div id="anchor-status" aria-live="polite">${anchorPanel(dashboard.anchoring)}</div>
+    <p class="anchor-meta" id="anchor-refresh-error" role="status" hidden>Couldn’t refresh anchoring status. Reconnecting…</p>
+  </section>
   <section class="admin-section">
     <form class="panel admin-settings" data-operation="settings">${heading("Reporting portal")}
       <div class="fields"><label>Organisation name<input name="name" value="${esc(dashboard.organisation.name)}" required minlength="2" maxlength="100"></label></div>
@@ -190,6 +220,37 @@ async function refresh() {
     state = error.status === 401 ? "guest" : "error";
   }
   render(true);
+}
+
+let checkingAnchor = false;
+async function refreshAnchor() {
+  const current = dashboard;
+  if (!current?.anchoring || checkingAnchor || document.hidden) return;
+  checkingAnchor = true;
+  try {
+    const anchor = await api("/api/admin/anchoring");
+    if (current !== dashboard) return;
+    const panel = document.getElementById("anchor-status");
+    if (panel && JSON.stringify(anchor) !== JSON.stringify(current.anchoring)) {
+      const previous = anchorPanel(current.anchoring);
+      current.anchoring = anchor;
+      const markup = anchorPanel(anchor);
+      if (previous !== markup) {
+        const focused = panel.contains(document.activeElement) ? document.activeElement.getAttribute("href") : null;
+        panel.innerHTML = markup;
+        if (focused) Array.from(panel.querySelectorAll("a")).find(link => link.getAttribute("href") === focused)?.focus();
+      }
+    }
+    document.getElementById("anchor-refresh-error").hidden = true;
+  } catch (error) {
+    if (current !== dashboard) return;
+    if (error.status === 401 || error.status === 404) { await refresh(); return; }
+    document.getElementById("anchor-refresh-error").hidden = false;
+  } finally { checkingAnchor = false; }
+}
+if (tenantPrefix && !joining) {
+  setInterval(refreshAnchor, 30_000);
+  document.addEventListener("visibilitychange", refreshAnchor);
 }
 
 function showError(error, form) {

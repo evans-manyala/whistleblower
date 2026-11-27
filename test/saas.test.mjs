@@ -9,6 +9,7 @@ import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import { runAnchorSweep } from "../lib/anchors.mjs";
 import { findOrganisation, openRegistry, tenantDatabasePath, tenantDirectory } from "../lib/tenants.mjs";
 
 const run = promisify(execFile);
@@ -32,7 +33,7 @@ async function startSaas(context) {
   const env = {
     ...process.env, PORT: "0", WHISTLEBLOWER_DATA_DIR: root, WHISTLEBLOWER_ARCHIVE_DIR: archive,
     WHISTLEBLOWER_KEYS_DIR: keys, WHISTLEBLOWER_PLATFORM_ADMIN_PASSWORD: pretendPlatformPassword,
-    WHISTLEBLOWER_ORIGIN: "",
+    WHISTLEBLOWER_ORIGIN: "", WHISTLEBLOWER_OTS_BIN: join(temp, "test-ots"),
   };
   let server;
   let closed;
@@ -56,9 +57,8 @@ async function startSaas(context) {
   return { root, archive, keys, env, base, temp };
 }
 
-test("SaaS roles, reports, case credentials, backups and proofs never cross organisation boundaries", { timeout: 60_000 }, async (context) => {
-  const { base, root, archive, keys, env, temp } = await startSaas(context);
-  const api = async (path, body, cookie, origin = base) => {
+function apiFor(base) {
+  return async (path, body, cookie, origin = base) => {
     const headers = { ...(cookie ? { Cookie: cookie } : {}) };
     const response = await fetch(base + path, body === undefined ? { headers } : {
       method: "POST", headers: { ...headers, Origin: origin, "Content-Type": "application/json" },
@@ -67,6 +67,11 @@ test("SaaS roles, reports, case credentials, backups and proofs never cross orga
     const setCookie = response.headers.get("set-cookie");
     return { status: response.status, data: await response.json(), setCookie, cookie: setCookie?.split(";")[0] };
   };
+}
+
+test("SaaS roles, reports, case credentials, backups and proofs never cross organisation boundaries", { timeout: 60_000 }, async (context) => {
+  const { base, root, archive, keys, env, temp } = await startSaas(context);
+  const api = apiFor(base);
   const cli = (...args) => run(process.execPath, ["--disable-warning=ExperimentalWarning", "scripts/integrity.mjs", ...args], { env });
   const fail = (promise, pattern) => assert.rejects(promise, (error) => error.code === 1 && pattern.test(error.stderr));
 
@@ -93,6 +98,7 @@ test("SaaS roles, reports, case credentials, backups and proofs never cross orga
   assert.equal((await api(tenant("alpha-org", "admin/settings"), undefined, p)).status, 401);
   assert.equal((await api(tenant("alpha-org", "reviewer/reports"), undefined, p)).status, 401);
 
+  assert.equal((await api(tenant("alpha-org", "admin/anchoring"), undefined, p)).status, 401);
   const oldAlphaInvite = alpha.data.invite.code;
   const renewed = await api(central + "/workspaces/alpha-org/setup-invite", { email: "same-admin@example.test" }, p);
   assert.equal(renewed.status, 200);
@@ -195,4 +201,134 @@ test("SaaS roles, reports, case credentials, backups and proofs never cross orga
   assert.equal((await api(tenant("beta-org", "track"), { code: code("beta-org") })).status, 200);
   assert.equal((await fetch(base + "/platform.sqlite")).status, 404);
   assert.equal((await fetch(base + "/o/alpha-org/whistleblower.sqlite")).status, 404);
+});
+
+test("automatic tenant anchors resume, verify their own case history and serve authenticated proof pairs", async (context) => {
+  const { base, root, archive, temp, env } = await startSaas(context);
+  const api = apiFor(base);
+  const platformSession = await api(central + "/login", { email: platformEmail, password: pretendPlatformPassword });
+  async function workspace(slug) {
+    const created = await api(central + "/workspaces", { name: slug, slug, adminEmail: "admin@example.test" }, platformSession.cookie);
+    const admin = await api(tenant(slug, "auth/accept"), { code: created.data.invite.code, password });
+    const registry = openRegistry(root);
+    try { return { org: findOrganisation(registry, slug), admin }; }
+    finally { registry.close(); }
+  }
+  const { org: rowA, admin: alphaAdmin } = await workspace("alpha-org");
+  const { org: rowB, admin: betaAdmin } = await workspace("beta-org");
+  const invited = await api(tenant(rowA.slug, "admin/invites"), { email: "reviewer@example.test", role: "reviewer" }, alphaAdmin.cookie);
+  const reviewer = await api(tenant(rowA.slug, "auth/accept"), { code: invited.data.invite.code, password });
+  const endpoint = (org, suffix = "") => tenant(org.slug, "admin/anchoring" + suffix);
+  const status = (org, admin) => api(endpoint(org), undefined, admin.cookie).then(response => response.data);
+  const fetchFile = (org, admin, kind) => fetch(base + endpoint(org, "/2/" + kind), { headers: { Cookie: admin.cookie } });
+  assert.equal((await status(rowA, alphaAdmin)).state, "waiting");
+  assert.equal((await api(endpoint(rowA), undefined, reviewer.cookie)).status, 401);
+  assert.equal((await fetchFile(rowA, betaAdmin, "receipt")).status, 401);
+  assert.equal((await fetchFile(rowA, alphaAdmin, "receipt")).status, 404);
+
+  const modeFile = join(temp, "calendar-state");
+  const log = join(temp, "stamp-log");
+  const client = env.WHISTLEBLOWER_OTS_BIN;
+  await writeFile(modeFile, "pending");
+  await writeFile(client, `#!/usr/bin/env node
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const [cache, command, ...args] = process.argv.slice(2);
+const file = args.at(-1);
+const mode = fs.readFileSync(${JSON.stringify(modeFile)}, "utf8");
+if(cache !== "--no-cache") process.exit(2);
+if (command === "stamp") {
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  fs.writeFileSync(file + ".ots", JSON.stringify({ digest }));
+  fs.appendFileSync(${JSON.stringify(log)}, digest + "\\n");
+} else {
+  const proof = JSON.parse(fs.readFileSync(file));
+  if (command === "info") console.log("File sha256 hash: " + proof.digest);
+  if (command === "upgrade") {
+    if(mode === "pending") { console.error("Pending confirmation in Bitcoin blockchain\\nFailed! Timestamp not complete"); process.exit(1); }
+    fs.writeFileSync(file, JSON.stringify({...proof, attested: true}));
+  }
+  if (command === "verify") {
+    if (!proof.attested || mode === "offline" || args[1] !== proof.digest) process.exit(1);
+    console.log("Success! Bitcoin block 123456 attests existence");
+  }
+}
+`, { mode: 0o700 });
+  const priorArchive = process.env.WHISTLEBLOWER_ARCHIVE_DIR;
+  const priorOts = process.env.WHISTLEBLOWER_OTS_BIN;
+  process.env.WHISTLEBLOWER_ARCHIVE_DIR = archive;
+  process.env.WHISTLEBLOWER_OTS_BIN = client;
+  let registry = openRegistry(root);
+  let time = Date.now() + 3600_000;
+  const sweep = () => runAnchorSweep(registry, root, { now: () => time });
+  try {
+    await sweep();
+    assert.equal((await status(rowA, alphaAdmin)).state, "waiting");
+    for (const org of [rowA, rowB]) assert.equal((await api(tenant(org.slug, "reports"), sample(org.slug))).status, 201);
+    time += 60_000;
+    await Promise.all([sweep(), sweep()]);
+    for (const [org, admin] of [[rowA, alphaAdmin], [rowB, betaAdmin]]) {
+      assert.equal((await status(org, admin)).state, "pending");
+      assert.equal((await status(org, admin)).verified, null);
+    }
+    // Simulate loss of the state transition after the first receipt reached disk.
+    registry.prepare("UPDATE anchor_jobs SET phase='queued',next_at=0 WHERE org=?").run(rowA.id);
+    registry.close();
+    registry = openRegistry(root);
+    await sweep();
+    assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 2);
+    time += 15 * 60_000;
+    await sweep();
+    assert.equal((await status(rowA, alphaAdmin)).state, "pending");
+
+    await writeFile(modeFile, "offline");
+    time += 15 * 60_000;
+    await sweep();
+    const unavailable = await status(rowA, alphaAdmin);
+    assert.equal(unavailable.state, "retrying");
+    assert.equal(unavailable.phase, "verifying");
+    assert.equal(unavailable.verified, null);
+    await writeFile(modeFile, "confirmed");
+    time += 15 * 60_000;
+    await sweep();
+    const verified = await status(rowA, alphaAdmin);
+    assert.deepEqual(verified.verified, { entries: 2, block: 123456, at: time });
+    assert.equal(verified.state, "verified");
+    const receipt = await fetchFile(rowA, alphaAdmin, "receipt");
+    assert.equal(receipt.status, 200);
+    assert.match(receipt.headers.get("content-disposition"), /auto-2\.json\.ots/);
+    const digest = createHash("sha256").update(Buffer.from(await (await fetchFile(rowA, alphaAdmin, "checkpoint")).arrayBuffer())).digest("hex");
+    assert.equal(JSON.parse(await receipt.text()).digest, digest);
+    const fileA = join(archive, rowA.id, "checkpoints", "auto-2.json.ots");
+    const fileB = join(archive, rowB.id, "checkpoints", "auto-2.json.ots");
+    await copyFile(fileA, fileB);
+    assert.equal((await fetchFile(rowB, betaAdmin, "receipt")).status, 409);
+    assert.equal((await fetchFile(rowA, alphaAdmin, "receipt")).status, 200);
+
+    // A new report gets its own job; the earlier block still refers to exactly two entries.
+    const nextCode = code("beta-org").replace(commonSecret, "4321-A0CD-5678-BEEF-0789-A1FA");
+    assert.equal((await api(tenant(rowB.slug, "reports"), { ...sample(rowB.slug), code: nextCode })).status, 201);
+    registry.prepare("UPDATE organisations SET active=0 WHERE id=?").run(rowB.id);
+    time += 3600_000;
+    await sweep();
+    assert.equal(registry.prepare("SELECT count(*) n FROM anchor_jobs WHERE org=?").get(rowB.id).n, 1);
+    registry.prepare("UPDATE organisations SET active=1 WHERE id=?").run(rowB.id);
+    await sweep();
+    const next = await status(rowB, betaAdmin);
+    assert.equal(next.entries, 4);
+    assert.equal(next.state, "pending");
+    assert.deepEqual(next.verified, verified.verified);
+    const cases = new DatabaseSync(tenantDatabasePath(root, rowB));
+    try { cases.prepare("UPDATE reports SET description='modified' WHERE code_hash=(SELECT code_hash FROM reports LIMIT 1)").run(); }
+    finally { cases.close(); }
+    time += 3600_000;
+    await sweep();
+    assert.equal((await status(rowB, betaAdmin)).state, "check_failed");
+    assert.equal((await status(rowB, betaAdmin)).verified.entries, 2);
+    assert.equal((await status(rowA, alphaAdmin)).state, "verified");
+  } finally {
+    registry.close();
+    if (priorArchive === undefined) delete process.env.WHISTLEBLOWER_ARCHIVE_DIR; else process.env.WHISTLEBLOWER_ARCHIVE_DIR = priorArchive;
+    if (priorOts === undefined) delete process.env.WHISTLEBLOWER_OTS_BIN; else process.env.WHISTLEBLOWER_OTS_BIN = priorOts;
+  }
 });

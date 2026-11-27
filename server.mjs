@@ -5,6 +5,7 @@ import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import { adminApi, tenantAccess } from "./lib/admin-api.mjs";
 import { initializeDatabase } from "./lib/case-history.mjs";
 import { HttpError, requireSameOrigin, sendJson } from "./lib/http.mjs";
@@ -97,7 +98,7 @@ async function dispatch(request, response, url) {
   if (relative === "/") return renderHtml(request, response, "index.html", organisation);
   if (relative === "/admin/" || relative === "/join/") return renderHtml(request, response, "admin.html", organisation);
   if (relative?.startsWith("/api/admin/") || relative === "/api/auth/accept") {
-    return await adminApi(platformStore, request, response, url, prefix, relative, organisation);
+    return await adminApi(platformStore, request, response, url, prefix, relative, organisation, { registry, dataDirectory });
   }
   if (relative?.startsWith("/api/")) {
     const db = openTenantDatabase(dataDirectory, organisation);
@@ -134,6 +135,15 @@ const server = createServer(async (request, response) => {
 
 server.requestTimeout = 15_000;
 server.listen(port, host, () => {
+  if (saas) {
+    function startAnchoring() {
+      const worker = new Worker(new URL("./scripts/anchor-worker.mjs", import.meta.url), { workerData: { root: dataDirectory } });
+      worker.on("error", (error) => console.error("Bitcoin anchoring worker failed", error.code || error.name));
+      worker.on("exit", () => { if (server.listening) setTimeout(startAnchoring, 60_000).unref(); });
+      worker.unref();
+    }
+    startAnchoring();
+  }
   console.log(`Whistleblower is running at http://${host}:${server.address().port}/${saas ? " (SaaS)" : ""}`);
   if (demo) console.log(`Demo uses temporary data. Reviewer passphrase: ${configuredPassword}`);
   else if (!saas && !configuredPassword) console.log("Reviewer access is disabled until WHISTLEBLOWER_REVIEWER_PASSWORD is set.");

@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createBackupKey, createEncryptedBackup, readBackupKey, restoreEncryptedBackup } from "../lib/backup.mjs";
+import { checkpointDirectory } from "../lib/anchors.mjs";
 import { verifyCaseHistory } from "../lib/case-history.mjs";
 import { readCheckpoint, saveCheckpoint, stampCheckpoint, upgradeCheckpoint, verifyBitcoinAnchor } from "../lib/checkpoints.mjs";
 
@@ -65,9 +66,10 @@ function operatorPaths(root, org, values, command, operands) {
   if (!row) throw new Error("Unknown organisation.");
   const keyPath = ["keygen", "backup", "restore"].includes(command)
     ? join(requireDirectory("WHISTLEBLOWER_KEYS_DIR"), row.id + ".wbkey") : null;
-  const archive = command !== "keygen" && (operands.length || values.checkpoint)
+  const archive = ["backup", "restore"].includes(command)
     ? join(requireDirectory("WHISTLEBLOWER_ARCHIVE_DIR"), row.id) : null;
-  const checkpointFile = values.checkpoint ? join(archive, "checkpoints", artifactName(values.checkpoint, ".json")) : null;
+  const checkpoints = checkpointDirectory(root, row);
+  const checkpointFile = values.checkpoint ? join(checkpoints, artifactName(values.checkpoint, ".json")) : null;
   let files = [];
   if (command === "keygen") files = [keyPath];
   else if (command === "backup" || command === "restore") {
@@ -75,7 +77,7 @@ function operatorPaths(root, org, values, command, operands) {
     if (command === "restore") {
       files.push(join(tenantDirectory(root, row), "recovery", artifactName(operands[1]), "whistleblower.sqlite"));
     }
-  } else if (operands.length) files = [join(archive, "checkpoints", artifactName(operands[0], ".json"))];
+  } else if (operands.length) files = [join(checkpoints, artifactName(operands[0], ".json"))];
   return { files, keyPath, checkpointFile, dbPath: tenantDatabasePath(root, row), logId: row.log_id };
 }
 
